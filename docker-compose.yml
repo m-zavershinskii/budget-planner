@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    container_name: budget-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: budget
+      POSTGRES_USER: budget
+      POSTGRES_PASSWORD: budget
+    ports:
+      - "5432:5432"
+    volumes:
+      - budget_pg:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U budget -d budget"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.goose
+      args:
+        GOOSE_VERSION: ${GOOSE_VERSION:-v3.28.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: postgres://budget:budget@postgres:5432/budget?sslmode=disable
+      GOOSE_MIGRATION_DIR: /migrations
+    volumes:
+      - ./migrations:/migrations
+    profiles:
+      - tools
+
+volumes:
+  budget_pg:
