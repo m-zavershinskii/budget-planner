@@ -2,6 +2,7 @@
 
 GOOSE_VERSION ?= v3.28.0
 MIGRATE = GOOSE_VERSION=$(GOOSE_VERSION) docker compose run --rm migrate
+SQLC ?= $(shell command -v sqlc 2>/dev/null || printf '%s/bin/sqlc' "$$(go env GOPATH)")
 
 help:
 	@printf '%s\n' \
@@ -49,7 +50,7 @@ migrate-create:
 	$(MIGRATE) create "$(name)" sql
 
 sqlc:
-	sqlc generate
+	$(SQLC) generate
 
 run:
 	go run ./cmd/server

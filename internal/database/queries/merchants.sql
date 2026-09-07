@@ -10,20 +10,14 @@ SELECT
     created_at,
     updated_at
 FROM merchants
-WHERE budget_id = $1
+WHERE budget_id = sqlc.arg(budget_id)
   AND archived = FALSE
   AND lower(name) LIKE lower(sqlc.arg(query)) || '%'
 ORDER BY name
 LIMIT 10;
 
 -- name: CreateMerchant :one
-INSERT INTO merchants (
-    budget_id,
-    name,
-    website_url,
-    icon,
-    notes
-)
+INSERT INTO merchants (budget_id, name, website_url, icon, notes)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 

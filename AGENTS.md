@@ -1,144 +1,279 @@
 # AGENTS.md — Budget Planner
 
-This file is the persistent project context and implementation contract for Codex/AI coding agents working in this repository.
+This file is the long-lived implementation contract for Codex and other coding agents working on Budget Planner.
 
-## 1. Product
+## Agent workflow
+
+Before making changes:
+
+1. Read this file.
+2. Read `ROADMAP.md`.
+3. Read relevant ADRs under `docs/decisions/`.
+4. Inspect the existing implementation before proposing replacements.
+5. Treat the repository code and migrations as the source of truth when they are newer than this document.
+
+While working:
+
+- Work on the current roadmap milestone unless the user explicitly changes priority.
+- Prefer small, reviewable vertical slices.
+- Do not silently change product requirements, architecture, database semantics, authentication rules, or infrastructure.
+- If a requested implementation conflicts with an ADR or this file, follow the user's newest explicit decision and update the documentation.
+- Do not mark roadmap work complete merely because code was generated. Verify it as far as the environment permits.
+
+After completing work:
+
+- Update `ROADMAP.md`.
+- Update this file if a durable product/architecture rule changed.
+- Add or supersede an ADR when an important architectural decision changes.
+- Update README/developer commands when operational behavior changes.
+- Never leave documentation claiming an obsolete stack choice.
+
+## Product
 
 Budget Planner is a private, invite-only web application for personal and shared budget planning.
 
-Core goals:
-- Record income, expenses, and transfers.
-- Plan monthly spending by category and compare plan vs actual.
-- Support multiple financial accounts.
-- Associate transactions with configurable merchants/places such as REWE, Lidl, Amazon, Deutsche Bahn, a landlord, clinic, etc.
-- Provide useful budget and merchant analytics.
-- Work well on desktop and mobile.
-- Keep deployment simple: preferably one Go application binary plus PostgreSQL.
+Core capabilities:
 
-This is a modular monolith. Do not introduce microservices unless the architecture is explicitly changed later.
+- income, expenses and transfers;
+- monthly planning by category;
+- plan-vs-actual reporting;
+- multiple financial accounts;
+- configurable categories;
+- configurable merchants/transaction counterparties;
+- desktop and mobile web UI;
+- shared budgets with access levels;
+- administrative user access management.
 
-## 2. Current technical direction
+Deployment should remain simple: one Go application plus PostgreSQL. The Go application should ultimately be distributable as a single binary with web assets embedded where practical.
 
-Backend:
-- Go.
-- Standard `net/http` is acceptable; add a small router only if it materially improves the code.
-- PostgreSQL.
-- `pgx/v5` for PostgreSQL connectivity.
-- `sqlc` for typed database access.
-- `goose` for versioned SQL migrations; Goose CLI runs in a Docker container, not on the host.
-- `log/slog` for structured logging.
+## Architecture
 
-Frontend direction:
-- Server-rendered HTML.
-- Prefer Go templates / templ + HTMX and minimal JavaScript.
-- Responsive UI for desktop and mobile.
-- Avoid a separate Node.js frontend runtime unless a future requirement genuinely needs it.
-- Static assets/templates should ultimately be embedded with Go `embed` so production can be distributed as a single application binary.
+Use a modular monolith.
 
-Deployment target:
-- One Go binary + PostgreSQL.
-- Docker may be used for local development and optional deployment.
-- Runtime configuration must come from environment variables, not committed secrets.
+Do not introduce microservices, Kafka, Redis, GraphQL, or a separate frontend runtime without a concrete requirement.
 
-## 3. Authentication and registration
+Preferred application stack:
 
-There is NO public registration.
+- Go
+- PostgreSQL
+- `pgx/v5`
+- `sqlc`
+- Goose migrations
+- `log/slog`
+- standard Go HTTP facilities unless a small router clearly improves the implementation
+- server-rendered responsive HTML
+- HTMX/minimal JavaScript is preferred when interactivity is needed
+- Go `embed` for production web assets when the UI is introduced
 
-A user may register only through an administrator-created invitation.
+Keep domain code under `internal/`.
+
+Do not create a generic `utils` dumping ground.
+
+Prefer clear boundaries between:
+- HTTP handlers;
+- services/use cases;
+- persistence/database queries.
+
+Do not create interfaces mechanically. Add them at meaningful boundaries where they improve isolation or testing.
+
+## Current infrastructure source of truth
+
+### PostgreSQL
+
+Docker Compose currently uses:
+
+- image: `postgres:18.6-alpine`
+- container: `budget-postgres`
+- database: `budget`
+- user: `budget`
+- password: `budget` for local development
+- host port: `5432`
+- volume: `budget_pg:/var/lib/postgresql`
+
+Health check:
+
+```yaml
+test: ["CMD-SHELL", "pg_isready -U budget -d budget"]
+interval: 5s
+timeout: 5s
+retries: 10
+```
+
+Do not revert the PostgreSQL image/version or volume path to an older generated configuration unless explicitly requested.
+
+### Database migrations
+
+The migration system is Goose, not Flyway.
+
+Docker Compose has a tools-profile service named `migrate`.
+
+Current migration container contract:
+
+```yaml
+migrate:
+  build:
+    context: .
+    dockerfile: Dockerfile.goose
+    args:
+      GOOSE_VERSION: ${GOOSE_VERSION:-v3.28.0}
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    GOOSE_DRIVER: postgres
+    GOOSE_DBSTRING: postgres://budget:budget@postgres:5432/budget?sslmode=disable
+    GOOSE_MIGRATION_DIR: /migrations
+  volumes:
+    - ./migrations:/migrations
+  profiles:
+    - tools
+```
+
+`Dockerfile.goose` currently uses:
+
+- `alpine:3.24`
+- Goose default version `v3.28.0`
+- release binary downloaded from Pressly Goose GitHub releases
+- `/usr/local/bin/goose`
+- `WORKDIR /migrations`
+- `ENTRYPOINT ["goose"]`
+
+Preserve the user's actual `Dockerfile.goose` implementation when editing the repository.
+
+Migration rules:
+
+- use Goose SQL migrations;
+- do not replace Goose with Flyway unless explicitly requested;
+- migrations already applied/shared should be treated as immutable;
+- schema changes get new migrations;
+- keep migration state reproducible from an empty PostgreSQL database;
+- important invariants belong in PostgreSQL as well as application validation.
+
+## Authentication and registration
+
+There is no public registration.
+
+Users can register only after an administrator creates an invitation for a specific email address.
 
 Intended flow:
-1. Admin creates an invitation for a specific email address.
-2. Application generates a cryptographically random one-time token.
-3. Only a hash of the token is stored in PostgreSQL.
-4. Invitation has an expiration time and can be revoked.
-5. User follows the invitation URL.
+
+1. Administrator creates an invitation for an email.
+2. Generate a cryptographically random one-time invitation token.
+3. Store only a secure hash of the token.
+4. Invitation has an expiry and can be revoked.
+5. User follows the invite link.
 6. User authenticates with Google OAuth 2.0 / OpenID Connect.
-7. The verified Google email must match the invitation email, case-insensitively.
-8. Only then is the user account created/activated.
-9. Invitation is marked as used.
-10. Reuse, expired invitations, revoked invitations, and mismatched emails must be rejected.
+7. Require a verified Google email.
+8. Google email must match the invitation email case-insensitively.
+9. Create/activate the user atomically with consuming the invitation.
+10. Reject expired, revoked, used, invalid, or mismatched invitations.
 
-Do not implement a generic "Sign up with Google" path that bypasses invitations.
+Do not create a generic Google signup route that bypasses invitations.
 
-The invitation sender/delivery mechanism is not fixed yet. Do not add an email provider until requested. The admin UI may initially generate a copyable invite URL.
+Invitation email delivery is not decided yet. Initially the admin UI may generate a copyable invite URL.
 
-Sessions:
-- Use secure server-side authentication semantics.
-- Cookies must be HttpOnly and SameSite-protected; Secure in production.
-- Do not put OAuth tokens or sensitive user data in client-readable cookies.
-- OAuth `state` must be validated.
-- Prefer OIDC identity claims and verified email rather than treating an arbitrary OAuth email as trusted.
+### Sessions
 
-Bootstrap admin:
-- The first administrator mechanism is not finalized.
-- Current likely approach: `INITIAL_ADMIN_EMAIL` environment variable or an explicit bootstrap command.
-- Avoid creating an insecure public bootstrap endpoint.
+Sessions must use secure server-side authentication semantics.
 
-Authorization:
-- Global roles/permissions exist for application-level administration.
-- Initial roles: `admin`, `user`.
-- Current permission names:
-  - `users.manage`
-  - `budgets.manage`
-  - `transactions.manage`
-  - `categories.manage`
-  - `merchants.manage`
-- Budget membership separately controls access to an individual budget:
-  - `owner`
-  - `editor`
-  - `viewer`
-- Do not conflate global admin permissions with per-budget membership.
+Requirements:
 
-## 4. Domain model
+- HttpOnly cookie;
+- SameSite protection;
+- Secure cookie in production;
+- OAuth state validation;
+- do not expose OAuth tokens in browser-readable storage;
+- session revocation/logout support;
+- authorization is always checked server-side.
+
+Exact session persistence design is intentionally not finalized until the auth milestone is implemented.
+
+### First administrator
+
+Bootstrap mechanism is not finalized.
+
+Likely options:
+- `INITIAL_ADMIN_EMAIL`;
+- explicit bootstrap CLI/command.
+
+Do not create an unauthenticated public admin-bootstrap HTTP endpoint.
+
+## Authorization
+
+Global application authorization and per-budget authorization are separate.
+
+Initial global roles:
+- `admin`
+- `user`
+
+Current permissions:
+- `users.manage`
+- `budgets.manage`
+- `transactions.manage`
+- `categories.manage`
+- `merchants.manage`
+
+Per-budget membership:
+- `owner`
+- `editor`
+- `viewer`
+
+Never rely on frontend hiding for authorization.
+
+Every budget-scoped read/write must verify that the authenticated user can access that budget.
+
+## Domain model
 
 ### User
-A registered person authenticated through Google after a valid invitation.
 
-Important fields currently include:
+Registered user authenticated through Google after invitation validation.
+
+Current conceptual fields:
 - `id`
 - `email`
 - `google_id`
 - `name`
 - `avatar_url`
 - `is_active`
+- timestamps
 
 ### Invite
-Admin-created registration authorization for one email.
 
-Important fields:
+Admin-issued registration authorization.
+
+Fields include:
+- `id`
 - `email`
 - `token_hash`
 - `created_by`
 - `expires_at`
 - `used_at`
 - `revoked_at`
+- `created_at`
 
 ### Budget
-A logical budget/workspace.
 
-A user may eventually participate in multiple budgets, for example:
-- Personal
-- Family
-- Vacation
-- Renovation
+Logical budget/workspace with a base currency.
 
-Each budget has a base currency.
+A user may eventually participate in multiple budgets, such as Personal, Family, Vacation or Renovation.
 
 ### BudgetMember
-Links users to budgets with one of:
+
+Links a user to a budget with:
 - `owner`
 - `editor`
 - `viewer`
 
 ### Account
-A money-holding account within a budget.
+
+Money-holding account within a budget.
 
 Examples:
-- Cash
-- N26
-- Revolut
-- Sparkasse
-- Credit card
+- cash;
+- N26;
+- Revolut;
+- Sparkasse;
+- credit card.
 
 Current account types:
 - `cash`
@@ -148,7 +283,8 @@ Current account types:
 - `other`
 
 ### Category
-Classification of income or expense.
+
+Income/expense classification.
 
 Types:
 - `income`
@@ -163,16 +299,20 @@ Examples:
 - Health
 - Entertainment
 
-Category and merchant are deliberately separate concepts.
+Category and merchant are deliberately separate.
 
 Example:
-- category = `Groceries`
-- merchant = `REWE`
 
-The same merchant may be used with different categories.
+```text
+Category: Groceries
+Merchant: REWE
+```
+
+A single merchant can appear under different categories.
 
 ### Merchant
-Configurable transaction counterparty/place/vendor.
+
+Configurable vendor/place/counterparty associated with a transaction.
 
 Examples:
 - REWE
@@ -186,35 +326,43 @@ Examples:
 - clinic
 - landlord
 
-Current fields:
+Current conceptual fields:
+- `id`
+- `budget_id`
 - `name`
 - `website_url`
 - `icon`
 - `notes`
 - `archived`
+- timestamps
 
-Merchant names are unique per budget case-insensitively.
+Merchant names should be unique per budget case-insensitively.
 
 Important UX requirement:
-While creating/editing a transaction, merchant selection is an autocomplete/typeahead field.
-- Search existing merchants as the user types.
-- If no suitable merchant exists, show an action such as `Create "REWE Center"`.
-- Creating the merchant should immediately select it in the transaction form.
-- This flow must be fast on mobile and desktop.
 
-Merchant's `website_url` is NOT the same as a transaction's `external_url`.
+The transaction form has merchant autocomplete/typeahead.
 
-Example:
-- merchant.website_url = REWE corporate/site URL
-- transaction.external_url = optional URL to the specific order, receipt, invoice, booking, etc.
+As the user types:
+- search existing merchants;
+- show matching merchants;
+- if no suitable merchant exists, offer `Create "<entered name>"`;
+- creating the merchant immediately selects it in the current transaction form.
+
+This must work efficiently on both mobile and desktop.
+
+`merchant.website_url` and `transaction.external_url` are different:
+
+- merchant URL = general merchant website;
+- transaction URL = optional link to the specific receipt/order/invoice/booking/etc.
 
 ### Transaction
-Represents:
+
+Types:
 - `income`
 - `expense`
 - `transfer`
 
-Important fields:
+Fields include:
 - `budget_id`
 - `account_id`
 - `transfer_account_id`
@@ -227,315 +375,173 @@ Important fields:
 - `external_url`
 - `transaction_date`
 - `created_by`
+- timestamps
 
 Rules:
-- Amount must be positive.
-- Money is stored as integer minor units (`BIGINT`), never floating point.
-  - EUR 12.50 => `1250`.
-- Expense/income requires a category.
-- Transfer requires a destination `transfer_account_id`.
-- Transfer must not use a category or merchant.
-- Source and destination account must differ.
-- Merchant is optional for normal income/expense transactions.
-- `external_url` is optional.
+
+- `amount > 0`;
+- expense/income requires a category;
+- transfer requires a destination account;
+- transfer does not use a category or merchant;
+- source and destination accounts differ;
+- merchant is optional for ordinary income/expense;
+- external transaction URL is optional.
 
 ### BudgetPlan
-Monthly planned amount for a category.
 
-Identity:
+Monthly planned amount by category.
+
+Logical uniqueness:
 - budget
 - category
 - year
 - month
 
-Purpose:
-Compare monthly planned spending/income with actual transactions.
+Used for plan-vs-actual analysis.
 
-## 5. Database invariants and security
+## Money
 
-The database is PostgreSQL and should enforce important invariants in addition to application validation.
+Never use floating-point types for money.
 
-Critical rule for future implementation:
-A referenced account/category/merchant must belong to the SAME budget as the transaction.
+Use integer minor units:
 
-The current initial migration does not yet fully enforce all cross-budget relationships at the database level. Before treating the transaction subsystem as production-ready, add constraints or transaction-safe application checks so it is impossible to attach:
-- an account from Budget A to a transaction in Budget B;
-- a category from Budget A to Budget B;
-- a merchant from Budget A to Budget B;
-- a transfer destination from another budget.
-
-Do not trust IDs supplied by the browser. Every read/write must be scoped by the authenticated user's accessible budget(s).
-
-Use database transactions for multi-step operations such as:
-- consuming an invite and creating a user;
-- creating related records that must succeed atomically;
-- future transfer/account operations when multiple rows are involved.
-
-Email comparisons should be normalized/case-insensitive where relevant.
-
-Do not store plaintext invitation tokens.
-
-## 6. Money and currency
-
-Never use `float32` or `float64` for monetary values.
-
-Current representation:
 - PostgreSQL: `BIGINT`
 - Go: `int64`
-- Value represents the currency's minor unit.
 
-Example for EUR:
-- `€1.00` => `100`
-- `€12.50` => `1250`
+For EUR:
+- €1.00 => 100
+- €12.50 => 1250
+- €1349.99 => 134999
 
-Current schema stores a three-letter currency code on budgets/accounts/transactions. Do not silently perform FX conversion. Multi-currency conversion/exchange-rate behavior is not designed yet.
+Currency codes are three-letter codes such as `EUR`, `USD`, `RUB`.
 
-## 7. UI direction
+Do not silently implement FX conversion. Exchange-rate behavior is not designed yet.
 
-Desktop:
-- Persistent/compact navigation is acceptable.
-- Main areas expected:
-  - Dashboard
-  - Transactions
-  - Budget/Plan
-  - Categories
-  - Merchants
-  - Accounts
-  - Reports
-  - Admin (authorized users only)
+## Database integrity
 
-Mobile:
-- Responsive, touch-friendly controls.
-- Transaction creation should require minimal taps.
-- Merchant autocomplete + inline creation is a priority.
-- Do not build a separate mobile application at this stage.
+Important cross-budget invariant:
 
-The visual design system is not finalized. Avoid hard-coding architecture around a specific CSS framework until one is selected.
+A transaction and all referenced budget-owned entities must belong to the same budget.
 
-## 8. Intended HTTP areas
+It must not be possible to attach:
+- Account from Budget A to Transaction in Budget B;
+- Category from Budget A to Transaction in Budget B;
+- Merchant from Budget A to Transaction in Budget B;
+- transfer destination from another budget.
 
-Exact routes are not frozen, but likely areas are:
+Do not trust IDs supplied by the browser.
 
-- `/healthz`
-- `/auth/...`
-- `/invite/...`
-- `/dashboard`
-- `/transactions`
-- `/accounts`
-- `/categories`
-- `/merchants`
-- `/budget`
-- `/admin/users`
-- `/admin/invites`
+Enforce these rules using appropriate database constraints and/or transaction-safe server-side validation before the transaction module is considered production-ready.
 
-Merchant interaction will need equivalents of:
-- search merchants for current budget;
-- create merchant;
-- select newly created merchant in transaction form.
+Use PostgreSQL transactions for multi-step atomic operations, including invite consumption + user creation.
 
-Whether these are JSON endpoints or HTMX HTML fragment endpoints should be chosen consistently with the server-rendered UI.
+## UI direction
 
-## 9. Repository layout
+One responsive web application, not separate desktop/mobile applications.
 
-Current/target shape:
+Expected primary areas:
+- Dashboard
+- Transactions
+- Budget/Plan
+- Accounts
+- Categories
+- Merchants
+- Reports
+- Admin
+
+Mobile transaction entry is a priority. Avoid workflows that require excessive taps.
+
+Exact CSS framework and visual design system are not finalized.
+
+## Repository direction
+
+Target structure:
 
 ```text
-cmd/server/                 application entry point
+cmd/server/
 
-internal/config/            environment configuration
-internal/database/          pgx connection and DB infrastructure
-internal/database/db/       sqlc-generated code (generated; do not hand-edit)
-internal/database/queries/  SQL queries consumed by sqlc
+internal/config/
+internal/database/
+internal/database/db/       # sqlc generated; do not edit manually
+internal/database/queries/
 
-internal/auth/              future OAuth/session/invite auth logic
-internal/user/              future user domain
-internal/admin/             future administration
-internal/budget/            future budget domain
-internal/account/           future account domain
-internal/category/          future category domain
-internal/merchant/          future merchant domain
-internal/transaction/       future transaction domain
-internal/dashboard/         future dashboard/read models
+internal/auth/
+internal/user/
+internal/admin/
+internal/budget/
+internal/account/
+internal/category/
+internal/merchant/
+internal/transaction/
+internal/dashboard/
 
-migrations/                 goose versioned SQL migrations
-web/                        future templates/static assets
+migrations/
+web/
+docs/decisions/
 ```
 
-Keep domain code under `internal/`. Avoid a generic `utils` dumping ground.
+## sqlc
 
-For a domain package, prefer clear separation such as:
-- HTTP handler
-- service/use-case logic
-- repository/database access
+Use explicit SQL through sqlc for the main query layer.
 
-Do not force interfaces everywhere. Introduce interfaces at meaningful boundaries, especially when they improve testing or decouple infrastructure.
+Rules:
+- generated code is not hand-edited;
+- regenerate after query/schema changes;
+- scope budget-owned queries appropriately;
+- prefer explicit queries over a large ORM abstraction.
 
-## 10. Migration rules
-
-`goose` is the migration system.
-
-- Use SQL migrations with `-- +goose Up` and `-- +goose Down` sections.
-- New development migrations should be created with `make migrate-create name=<description>`; Goose generates timestamped filenames.
-- Never edit a migration that has already been shared/applied; add a new migration.
-- Keep `Down` migrations correct when a safe rollback is practical. If rollback would be destructive or misleading, make that risk explicit in the migration/review instead of pretending it is safe.
-- Constraints and indexes are part of the schema design, not an afterthought.
-- Run migrations explicitly; application startup must not silently mutate production schema.
-- The Goose schema version table is authoritative for migration state.
-- Developers must not need a host-installed Goose binary. Migration commands run through the Compose `migrate` service.
-- Standard commands are `make migrate-up`, `make migrate-down`, `make migrate-status`, `make migrate-version`, and `make migrate-create name=<description>`.
-- `make db-reset` is the preferred destructive reset for local development; it recreates PostgreSQL and reapplies all migrations.
-- Pin the Goose container version; do not silently switch to `latest`.
-
-Current initial migration:
-- `migrations/000001_initial.sql`
-
-## 11. sqlc rules
-
-`sqlc` is the preferred database query layer.
-
-- Write explicit SQL.
-- Keep queries scoped by `budget_id` and authorization context where appropriate.
-- Prefer returning only fields actually needed for a use case.
-- Generated code under `internal/database/db/` must not be manually edited.
-- Regenerate after changing SQL/schema.
-
-## 12. Configuration
-
-Current:
-- `APP_ADDR`
-- `DATABASE_URL`
-
-Expected future auth configuration:
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `GOOGLE_REDIRECT_URL`
-- session/auth secret(s)
-- optional `INITIAL_ADMIN_EMAIL`
-
-Never commit real secrets or credentials.
-Keep `.env.example` non-sensitive.
-
-## 13. Engineering constraints
+## Engineering rules
 
 Prefer:
-- boring, idiomatic Go;
-- explicit errors;
-- `context.Context` propagated into database/network calls;
-- graceful HTTP shutdown;
-- structured logging;
-- small cohesive packages;
+- idiomatic Go;
+- explicit error handling;
+- `context.Context` propagation;
+- graceful shutdown;
+- `slog`;
+- database constraints;
 - table-driven unit tests where useful;
-- integration tests for PostgreSQL-dependent behavior;
-- database constraints for critical invariants.
+- PostgreSQL integration tests for persistence-sensitive behavior;
+- small coherent changes.
 
 Avoid:
-- microservices;
-- Redis/Kafka without a demonstrated requirement;
-- GraphQL without a demonstrated requirement;
-- large ORM abstractions;
-- hidden global mutable state;
 - floating-point money;
 - public registration;
-- authorization checks only in the frontend;
-- business logic embedded directly in templates;
-- premature generic frameworks.
+- frontend-only authorization;
+- committed credentials;
+- hidden global mutable state;
+- premature generic frameworks;
+- replacing working infrastructure merely because an agent prefers another tool.
 
-## 14. Current implementation status
+## Definition of done
 
-Implemented in v0.1:
-- Go module.
-- HTTP server.
-- Graceful shutdown.
-- `/healthz` endpoint that checks PostgreSQL.
-- PostgreSQL Docker Compose service.
-- `pgx` pool setup.
-- Goose migration executed through a Docker Compose tool container.
-- Initial database schema.
-- `sqlc` configuration.
-- Initial user lookup queries.
-- Merchant search/create/get queries.
-- Makefile commands.
+A feature is not complete until applicable checks are satisfied:
 
-Not implemented yet:
-- Google OAuth/OIDC.
-- Sessions.
-- Invitation HTTP/admin flow.
-- First-admin bootstrap.
-- Authorization middleware.
-- HTML UI.
-- Budget CRUD.
-- Accounts CRUD.
-- Categories CRUD.
-- Merchant UI.
-- Transactions CRUD.
-- Monthly planning UI.
-- Dashboard/reports.
-- Tests.
+- implementation compiles;
+- `go test ./...` passes where the environment permits;
+- `go vet ./...` is clean where practical;
+- schema changes have Goose migrations;
+- sqlc output is regenerated when necessary;
+- authorization is server-side;
+- budget isolation is preserved;
+- errors are handled;
+- secrets are not committed;
+- ROADMAP is updated;
+- architecture/product documentation is updated when decisions change.
 
-## 15. Recommended implementation sequence
+## Open decisions
 
-Unless the user changes priorities:
+Do not invent these as finalized requirements:
 
-1. Authentication foundation:
-   - configuration for Google;
-   - secure session storage;
-   - Google OAuth/OIDC;
-   - invite validation/consumption;
-   - bootstrap first admin.
-2. Admin:
-   - create/list/revoke invites;
-   - list/disable users;
-   - assign global roles/permissions.
-3. Budget:
-   - create budget;
-   - membership and authorization.
-4. Accounts.
-5. Categories.
-6. Merchants:
-   - CRUD;
-   - autocomplete;
-   - inline creation.
-7. Transactions:
-   - income;
-   - expense;
-   - transfer;
-   - validation and cross-budget integrity.
-8. Budget plans.
-9. Dashboard and reporting.
-10. UI refinement for mobile/desktop.
-11. Embed templates/static assets and verify single-binary production build.
-
-## 16. Decisions that are intentionally NOT finalized
-
-Do not invent these as settled requirements:
-- CSS framework/design system.
-- `html/template` vs `templ`.
-- HTMX endpoint conventions.
-- exact session persistence implementation.
-- email delivery provider for invitations.
-- recurring transactions.
-- split transactions.
-- attachments/receipt uploads.
-- bank import/open-banking integrations.
-- exchange-rate conversion.
-- tags.
-- merchant logos fetched from external services.
-- localization.
-- exact reporting/chart set.
-
-When one of these becomes necessary, propose the smallest coherent design before implementing it.
-
-## 17. Definition of done for a change
-
-Before calling a feature complete:
-- `go test ./...` passes where dependencies/environment allow.
-- `go vet ./...` should be clean where practical.
-- SQL changes have migrations.
-- `sqlc generate` is run when schema/queries change.
-- authorization is checked server-side.
-- invalid cross-budget IDs cannot leak or mutate another budget.
-- errors are handled, not discarded without reason.
-- no credentials are committed.
-- README/AGENTS.md is updated when architecture or product decisions change.
-
-When implementing with Codex, preserve these product decisions unless the user explicitly changes them.
+- exact HTML templating library;
+- exact CSS framework;
+- exact session storage;
+- invitation email provider;
+- recurring transactions;
+- split transactions;
+- receipt attachments;
+- bank import/open banking;
+- FX conversion;
+- tags;
+- external merchant-logo service;
+- localization;
+- final reporting/chart set.

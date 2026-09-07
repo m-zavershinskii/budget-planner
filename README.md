@@ -3,7 +3,7 @@
 Технический фундамент приватного budget planner:
 
 - Go HTTP server
-- PostgreSQL 17
+- PostgreSQL 18.6
 - `pgx/v5`
 - `sqlc`
 - `goose` SQL migrations
@@ -121,6 +121,7 @@ go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 make sqlc
 ```
 
+`make sqlc` использует `sqlc` из `PATH` или `$(go env GOPATH)/bin/sqlc`.
 Generated code находится в `internal/database/db/` и не редактируется вручную.
 
 ## Основная структура
