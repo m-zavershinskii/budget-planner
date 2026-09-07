@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down db-reset migrate-build migrate-up migrate-down migrate-status migrate-version migrate-create sqlc run build
+.PHONY: help db-up db-down db-reset migrate-build migrate-up migrate-down migrate-status migrate-version migrate-create sqlc test test-integration run build
 
 GOOSE_VERSION ?= v3.28.0
 MIGRATE = GOOSE_VERSION=$(GOOSE_VERSION) docker compose run --rm migrate
@@ -16,6 +16,8 @@ help:
 		'make migrate-version               Show current DB migration version' \
 		'make migrate-create name=<name>    Create a timestamped SQL migration' \
 		'make sqlc                          Generate typed database code' \
+		'make test                          Run unit tests' \
+		'make test-integration              Run Docker/PostgreSQL integration tests' \
 		'make run                           Run the Go server locally' \
 		'make build                         Build the application binary'
 
@@ -51,6 +53,12 @@ migrate-create:
 
 sqlc:
 	$(SQLC) generate
+
+test:
+	go test ./...
+
+test-integration:
+	go test -tags=integration ./...
 
 run:
 	go run ./cmd/server

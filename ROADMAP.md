@@ -58,6 +58,14 @@ Status: `[x]`
 - [x] `/healthz` succeeds with a healthy database.
 - [x] `go test ./...` passes or any environment limitation is documented.
 
+### Automated test coverage
+
+- [x] Config defaults and environment overrides.
+- [x] `/healthz` success/failure behavior.
+- [x] Database URL validation.
+- [x] Initial migration guard for budget-scoped foreign keys.
+- [x] Docker/PostgreSQL integration test for applying Goose migrations to an empty database.
+
 ## Milestone 1 — Authentication foundation
 
 Status: `[ ]`

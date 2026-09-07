@@ -124,6 +124,24 @@ make sqlc
 `make sqlc` использует `sqlc` из `PATH` или `$(go env GOPATH)/bin/sqlc`.
 Generated code находится в `internal/database/db/` и не редактируется вручную.
 
+## Тесты
+
+Быстрые тесты:
+
+```bash
+make test
+```
+
+Они покрывают конфигурацию, `/healthz`, базовую database URL validation и guard-проверки initial migration.
+
+Интеграционный migration smoke test с Docker/PostgreSQL:
+
+```bash
+make test-integration
+```
+
+Он поднимает временный PostgreSQL container, применяет Goose migrations к пустой базе и проверяет budget-scoped foreign keys. Обычный `make test` этот Docker-сценарий не запускает.
+
 ## Основная структура
 
 ```text
